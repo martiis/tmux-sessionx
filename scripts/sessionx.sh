@@ -48,29 +48,68 @@ additional_input() {
 	sessions=$(get_sorted_sessions)
 	custom_paths=$(tmux show-option -gqv @sessionx-_custom-paths)
 	custom_path_subdirectories=$(tmux show-option -gqv @sessionx-_custom-paths-subdirectories)
+	custom_path_subdirectories_depth=$(tmux show-option -gqv @sessionx-_custom-paths-depth)
+	custom_path_display=$(tmux show-option -gqv @sessionx-_custom-paths-display)
 	if [[ -z "$custom_paths" ]]; then
 		echo ""
 	else
 		clean_paths=$(echo "$custom_paths" | sed -E 's/ *, */,/g' | sed -E 's/^ *//' | sed -E 's/ *$//' | sed -E 's/ /✗/g')
 		if [[ "$custom_path_subdirectories" == "true" ]]; then
-			paths=$(find ${clean_paths//,/ } -mindepth 1 -maxdepth 1 -type d)
+			if ! [[ "$custom_path_subdirectories_depth" =~ ^[0-9]+$ ]]; then
+				custom_path_subdirectories_depth=1
+			fi
+			paths=$(find ${clean_paths//,/ } -mindepth 1 -maxdepth "$custom_path_subdirectories_depth" -type d)
 		else
 			paths=${clean_paths//,/ }
 		fi
-		add_path() {
-			local path=$1
-			if ! grep -q "$(basename "$path")" <<< "$sessions"; then
-				echo "$path"
-			fi
-		}
-		export -f add_path
-		printf "%s\n" "${paths//,/$IFS}" | xargs -n 1 -P 0 bash -c 'add_path "$@"' _
+		awk -v sessions="$sessions" -v clean_paths="$clean_paths" -v custom_path_display="$custom_path_display" '
+			BEGIN {
+				split(sessions, session_list, "\n")
+				for (i in session_list) {
+					if (session_list[i] != "") {
+						active_sessions[session_list[i]] = 1
+					}
+				}
+
+				root_count = split(clean_paths, roots, ",")
+			}
+
+			{
+				path = $0
+				basename = path
+				sub(/^.*\//, "", basename)
+				if (active_sessions[basename]) {
+					next
+				}
+
+				display_path = path
+				if (custom_path_display == "relative") {
+					display_root = ""
+					for (i = 1; i <= root_count; i++) {
+						root = roots[i]
+						if (index(path, root "/") == 1 && length(root) > length(display_root)) {
+							display_root = root
+						}
+					}
+					if (display_root != "") {
+						root_name = display_root
+						sub(/^.*\//, "", root_name)
+						display_path = root_name "/" substr(path, length(display_root) + 2)
+					}
+					printf "%s\t%s\n", display_path, path
+				} else {
+					print path
+				}
+			}
+		' <<< "$paths"
 	fi
 }
 
 handle_output() {
 	set -- "$(strip_git_branch_info "$*")"
-	if [ -d "$*" ]; then
+	if [[ "$*" == *$'\t'* ]]; then
+		target="${*#*$'\t'}"
+	elif [ -d "$*" ]; then
 		# No special handling because there isn't a window number or window name present
 		# except in unlikely and contrived situations (e.g.
 		# "/home/person/projects:0\ bash" could be a path on your filesystem.)
@@ -121,14 +160,14 @@ handle_input() {
 	INPUT=$(input)
 	ADDITIONAL_INPUT=$(additional_input)
 	if [[ -n $ADDITIONAL_INPUT ]]; then
-		INPUT="$(additional_input)\n$INPUT"
+		INPUT="$ADDITIONAL_INPUT\n$INPUT"
 	fi
 	bind_back=$(tmux show-option -gqv @sessionx-_bind-back)
 	git_branch_mode=$(tmux show-option -gqv @sessionx-_git-branch)
 	if [[ "$git_branch_mode" == "on" ]]; then
 		BACK="$bind_back:reload(${CURRENT_DIR}/sessions_with_branches.sh)+change-preview(${CURRENT_DIR}/preview.sh {1})"
 	else
-		BACK="$bind_back:reload(echo -e \"${INPUT// /}\")+change-preview(${CURRENT_DIR}/preview.sh {1})"
+		BACK="$bind_back:reload(echo -e \"${INPUT// /}\")+change-preview(${CURRENT_DIR}/preview.sh {1} {2})"
 	fi
 }
 
@@ -137,6 +176,7 @@ run_plugin() {
 	eval $(tmux show-option -gqv @sessionx-_built-args)
 	eval $(tmux show-option -gqv @sessionx-_built-fzf-opts)
 	handle_input
+	args+=(--delimiter $'\t' --with-nth 1)
 	args+=(--bind "$BACK")
 
 	git_branch_mode=$(tmux show-option -gqv @sessionx-_git-branch)
